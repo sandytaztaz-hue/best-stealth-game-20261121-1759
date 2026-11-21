@@ -1,7 +1,6 @@
-// random.js — a small seeded RNG (mulberry32) for firefly drift, moss
-// placement and cricket timing, so a shot with seed=1 always looks the
-// same and real play still feels alive.
-export function mulberry32(seed) {
+// random.js — a tiny seeded RNG (mulberry32) for fireflies, moss and cricket timing.
+// Same seed, same garden: the screenshots stay deterministic.
+export function makeRng(seed) {
   let a = seed >>> 0;
   return function next() {
     a |= 0;
@@ -12,17 +11,10 @@ export function mulberry32(seed) {
   };
 }
 
-// Build a deterministic field of decorative points inside a rectangle.
-// Used once per level load so the moss patches and fireflies never jump.
-export function scatterPoints(rng, count, x, y, w, h) {
-  const points = [];
-  for (let i = 0; i < count; i += 1) {
-    points.push({ x: x + rng() * w, y: y + rng() * h, r: 2 + rng() * 5, a: 0.25 + rng() * 0.5 });
-  }
-  return points;
+export function range(rng, low, high) {
+  return low + rng() * (high - low);
 }
 
-// Pick a value in [min, max) from the seeded stream.
-export function rangeFrom(rng, min, max) {
-  return min + rng() * (max - min);
+export function pick(rng, items) {
+  return items[Math.floor(rng() * items.length)];
 }

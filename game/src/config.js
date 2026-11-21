@@ -1,94 +1,85 @@
-// config.js — tuning numbers and colours for Moonpetal Glasshouse.
-// One job: hold every constant the game balances on, so world.js and
-// render.js never hard-code a number that play-testing may need to move.
-export const CANVAS_WIDTH = 1280;
-export const CANVAS_HEIGHT = 720;
-export const HUD_HEIGHT = 64;
+// config.js — Moonpetal Glasshouse: every tuning number and colour in one place.
+// Nothing here touches the DOM; the world, senses and render modules read it.
+export const CANVAS_W = 1280;
+export const CANVAS_H = 720;
+export const HUD_H = 64;
+export const FIELD_TOP = 80;
+export const FIELD_LEFT = 20;
+export const FIELD_RIGHT = 1260;
+export const FIELD_BOTTOM = 700;
 
-// Movement (px per second).
 export const WALK_SPEED = 150;
 export const TIPTOE_SPEED = 70;
 export const GUARD_PATROL_SPEED = 55;
-export const GUARD_INVESTIGATE_SPEED = 95;
-export const GUARD_CHASE_SPEED = 130;
+export const GUARD_INVESTIGATE_SPEED = 72;
+export const GUARD_ALERT_SPEED = 96;
+export const SENTRY_TURN_SPEED = 0.55;
+export const GUARD_PAUSE_SECONDS = 1.2;
 
-// Vision cones: 70 degrees total, 230 px range.
-export const CONE_HALF_ANGLE = (35 * Math.PI) / 180;
+export const CONE_ANGLE = (70 * Math.PI) / 180;
 export const CONE_RANGE = 230;
-export const CONE_RAYS = 14;
+export const SENTRY_CONE_RANGE = 180;
+export const CONE_EDGE_SAMPLES = 14;
 
-// Detection meter 0..1.
-export const DETECT_RATE_LIT = 1.0; // per second, player standing in lamp light
-export const DETECT_RATE_SHADOW = 0.5; // per second, player in shadow
-export const DETECT_TIPTOE_MULT = 0.5; // tiptoeing halves the rise
-export const DETECT_DRAIN_RATE = 0.4; // per second while no guard sees you
-export const SUSPICIOUS_AT = 0.35; // meter level that makes guards suspicious
-export const ALERTED_AT = 1.0; // meter level that raises the alarm
-export const CAUGHT_DISTANCE = 30; // px: an alerted guard this close catches you
-export const LOSE_SIGHT_SECONDS = 4; // unseen for this long -> guards give up the chase
-export const SEARCH_SECONDS = 3; // guards check the last seen spot this long
+export const DETECT_IN_LIGHT = 1.0;
+export const DETECT_IN_SHADOW = 0.5;
+export const DETECT_TIPTOE_FACTOR = 0.5;
+export const DETECT_DRAIN = 0.4;
+export const SUSPICIOUS_AT = 0.35;
+export const ALERT_AT = 1.0;
 
-// Noise.
-export const WALK_NOISE_RADIUS = 90;
-export const TIPTOE_NOISE_RADIUS = 30;
-export const WALK_STEP_INTERVAL = 0.45; // seconds between footsteps while walking
-export const TIPTOE_STEP_INTERVAL = 0.7; // seconds between footsteps while tiptoeing
-export const PEBBLE_COUNT = 3; // pebbles per level, refilled each level
-export const PEBBLE_MAX_RANGE = 260; // px from the player
-export const PEBBLE_NOISE_RADIUS = 170; // px guards hear the landing ping
-export const PEBBLE_ARC_SECONDS = 0.4; // flight time of the tossed pebble
+export const NOISE_WALK_RADIUS = 90;
+export const NOISE_TIPTOE_RADIUS = 30;
+export const STEP_WALK_SECONDS = 0.45;
+export const STEP_TIPTOE_SECONDS = 0.7;
 
-// Guard behaviour.
-export const WAYPOINT_PAUSE = 1.2; // seconds a guard waits at each waypoint
-export const SUSPICIOUS_WAIT = 1.5; // seconds a guard stares before investigating
-export const INVESTIGATE_TIMEOUT = 4; // seconds with nothing found -> back to patrol
+export const PEBBLES_PER_LEVEL = 3;
+export const PEBBLE_THROW_RANGE = 260;
+export const PEBBLE_HEAR_RADIUS = 170;
+export const PEBBLE_FLIGHT_SECONDS = 0.4;
 
-// Player and guard sizes.
+export const CAUGHT_DISTANCE = 30;
+export const SEED_PICKUP_DISTANCE = 28;
 export const PLAYER_RADIUS = 13;
 export const GUARD_RADIUS = 14;
-export const SEED_RADIUS = 12;
-export const SEED_PICKUP_RADIUS = 30;
-export const PLAYER_START_RADIUS = 13;
+export const SEED_RADIUS = 16;
 
-// Lamp light radius used by every level.
-export const LAMP_RADIUS = 110;
-export const FIREFLY_COUNT = 26; // drifting motes that make the garden feel alive
+export const NO_SIGHT_SEARCH_SECONDS = 4;
+export const SEARCH_LOOK_SECONDS = 3;
+export const SUSPICIOUS_WAIT_SECONDS = 1.5;
+export const INVESTIGATE_LOOK_SECONDS = 4;
 
-// Colours.
 export const COLORS = {
   floor: '#0e1f1a',
   floorTile: '#12261f',
-  moss: '#0a1a14',
-  wallFace: '#33414a',
-  wallGlass: '#9db8c4',
-  wallEdge: '#6d8a97',
+  moss: '#0a1813',
+  wallStone: '#9db8c4',
+  wallStoneDark: '#6e8894',
+  wallGlass: '#b8d2dd',
   hedge: '#1d4a2e',
-  hedgeLeaf: '#2e6b3f',
-  hedgeLeafLight: '#4c8a55',
-  lampPool: 'rgba(245,185,66,0.30)',
-  lampCore: '#f5b942',
-  cone: 'rgba(245,185,66,0.26)',
-  coneSuspicious: 'rgba(245,166,66,0.40)',
-  coneAlerted: 'rgba(220,60,50,0.42)',
+  hedgeLeaf: '#2f6b41',
+  hedgeEdge: '#3f8a55',
+  lampPool: '#f5b942',
+  cone: '#f5b942',
+  coneAlert: '#e74c3c',
   player: '#cfefff',
-  playerCloak: '#7fa8b8',
+  playerCloak: '#7fb8c9',
   guardBody: '#1c2436',
   guardTrim: '#c0392b',
-  guardLantern: '#ffd27a',
+  guardLantern: '#ffd27f',
   seed: '#c9a7ff',
-  seedHalo: 'rgba(201,167,255,0.35)',
-  exitLocked: '#5a6b72',
+  seedCore: '#f2e9ff',
+  exitLocked: '#8a97a3',
   exitOpen: '#39d98a',
-  exitGlow: 'rgba(57,217,138,0.45)',
-  hudBar: 'rgba(6,14,11,0.78)',
+  hudBar: 'rgba(8, 18, 15, 0.82)',
   hudText: '#dcefe6',
-  hudMuted: '#8fb3a4',
-  alertUnseen: '#39d98a',
-  alertSuspicious: '#f5b942',
-  alertHunted: '#e74c3c',
-  meterGreen: '#39d98a',
-  meterAmber: '#f5b942',
-  meterRed: '#e74c3c',
-  titleGlow: 'rgba(201,167,255,0.25)',
-  vignetteRed: 'rgba(180,20,20,0.55)',
+  hudMuted: '#8fa89c',
+  amber: '#f5b942',
+  red: '#e74c3c',
+  green: '#39d98a',
+  violet: '#c9a7ff',
+  moonbeam: 'rgba(190, 220, 255, 0.05)',
+  stainedRose: 'rgba(214, 120, 140, 0.07)',
+  stainedTeal: 'rgba(90, 190, 170, 0.07)',
+  stainedAmber: 'rgba(245, 185, 66, 0.06)',
 };

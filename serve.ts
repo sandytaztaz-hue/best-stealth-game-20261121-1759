@@ -1,15 +1,12 @@
-// serve.ts — a tiny static server for local play-testing (standard
-// library only). Serves game/ on http://localhost:8080 so the game can
-// be played and screenshotted in desktop Chrome.
+// serve.ts — a tiny static server for local play-testing only.
+// Serves game/ on http://localhost:8080. Standard library only.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { join, dirname, extname } from 'node:path';
+import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), 'game');
-const PORT = 8080;
-
-const MIME = {
+const root = join(fileURLToPath(new URL('.', import.meta.url)), 'game');
+const types = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
@@ -17,29 +14,29 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
 };
 
 const server = createServer(async (req, res) => {
   try {
-    const url = new URL(req.url || '/', `http://localhost:${PORT}`);
+    const url = new URL(req.url || '/', 'http://localhost:8080');
     let path = decodeURIComponent(url.pathname);
     if (path === '/') path = '/index.html';
-    // Never serve anything outside game/.
-    const file = join(root, path);
+    const file = join(root, normalize(path));
     if (!file.startsWith(root)) {
       res.writeHead(403);
-      res.end('Forbidden');
+      res.end('forbidden');
       return;
     }
     const data = await readFile(file);
-    res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream' });
+    res.writeHead(200, { 'content-type': types[extname(file)] || 'application/octet-stream' });
     res.end(data);
-  } catch (e) {
+  } catch {
     res.writeHead(404);
-    res.end('Not found');
+    res.end('not found');
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Moonpetal Glasshouse at http://localhost:${PORT}/`);
+server.listen(8080, () => {
+  console.log('Moonpetal Glasshouse at http://localhost:8080');
 });

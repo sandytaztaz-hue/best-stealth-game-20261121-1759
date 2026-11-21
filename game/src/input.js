@@ -1,107 +1,110 @@
-// input.js — keyboard + mouse, nothing else. It keeps the raw key state
-// and hands the game a small intent object each frame, plus one-shot
-// events (toss a pebble, press Enter, press R) that the loop consumes.
-export function createInput(canvas, callbacks) {
+// input.js — keyboard and mouse, turned into one small state object.
+// WASD / arrows move, Shift tiptoes, click (or E) tosses a pebble at that
+// point, M mutes, R restarts, Enter starts / advances. No audio starts
+// before the first gesture: the handlers below count as the gesture.
+export function createInput(canvas) {
   const keys = new Set();
-  const state = {
-    keys,
-    moveX: 0,
-    moveY: 0,
+  const input = {
+    up: false,
+    down: false,
+    left: false,
+    right: false,
     tiptoe: false,
-    clickPoint: null, // {x, y} in canvas coords, consumed by the loop
-    enterPressed: false,
-    restartPressed: false,
-    mutePressed: false,
+    toss: null,
+    pressedEnter: false,
+    pressedRestart: false,
+    pressedMute: false,
+    firstGesture: false,
   };
 
-  function recomputeMove() {
-    let x = 0;
-    let y = 0;
-    if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-    if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
-    if (keys.has('KeyW') || keys.has('ArrowUp')) y -= 1;
-    if (keys.has('KeyS') || keys.has('ArrowDown')) y += 1;
-    if (x !== 0 && y !== 0) {
-      const inv = 1 / Math.hypot(x, y);
-      x *= inv;
-      y *= inv;
+  function markGesture() {
+    input.firstGesture = true;
+  }
+
+  function keyName(event) {
+    // Always lower-case: 'Enter' and 'enter' must be the same key, and
+    // 'Shift' must match the tiptoe check in updateFromKeys.
+    return event.key.toLowerCase();
+  }
+
+  window.addEventListener('keydown', (event) => {
+    markGesture();
+    const key = keyName(event);
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(event.key)) {
+      event.preventDefault();
     }
-    state.moveX = x;
-    state.moveY = y;
-    state.tiptoe = keys.has('ShiftLeft') || keys.has('ShiftRight');
-  }
+    keys.add(key);
+    keys.add(event.key);
+    if (key === 'enter') input.pressedEnter = true;
+    if (key === 'r') input.pressedRestart = true;
+    if (key === 'm') input.pressedMute = true;
+    updateFromKeys();
+  });
 
-  function onKeyDown(e) {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
-      e.preventDefault();
-    }
-    if (e.repeat) return;
-    keys.add(e.code);
-    if (e.code === 'Enter' || e.code === 'Space') state.enterPressed = true;
-    if (e.code === 'KeyR') state.restartPressed = true;
-    if (e.code === 'KeyM') state.mutePressed = true;
-    if (e.code === 'KeyE') callbacks.onTossKey();
-    recomputeMove();
-    callbacks.onFirstGesture();
-  }
+  window.addEventListener('keyup', (event) => {
+    keys.delete(keyName(event));
+    keys.delete(event.key);
+    updateFromKeys();
+  });
 
-  function onKeyUp(e) {
-    keys.delete(e.code);
-    recomputeMove();
-  }
+  window.addEventListener('blur', () => {
+    keys.clear();
+    updateFromKeys();
+  });
 
-  function onMouseDown(e) {
+  canvas.addEventListener('mousedown', (event) => {
+    markGesture();
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    state.clickPoint = {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
+    input.toss = {
+      x: (event.clientX - rect.left) * scaleX,
+      y: (event.clientY - rect.top) * scaleY,
     };
-    callbacks.onFirstGesture();
+    input.pressedEnter = true;
+  });
+
+  function updateFromKeys() {
+    input.up = keys.has('w') || keys.has('arrowup');
+    input.down = keys.has('s') || keys.has('arrowdown');
+    input.left = keys.has('a') || keys.has('arrowleft');
+    input.right = keys.has('d') || keys.has('arrowright');
+    input.tiptoe = keys.has('shift');
   }
 
-  function onBlur() {
-    keys.clear();
-    recomputeMove();
+  return input;
+}
+
+// The move direction for one step: -1..1 on each axis, normalised.
+export function moveDirection(input) {
+  let x = 0;
+  let y = 0;
+  if (input.left) x -= 1;
+  if (input.right) x += 1;
+  if (input.up) y -= 1;
+  if (input.down) y += 1;
+  if (x !== 0 && y !== 0) {
+    x *= Math.SQRT1_2;
+    y *= Math.SQRT1_2;
   }
+  return { x, y };
+}
 
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('blur', onBlur);
-  canvas.addEventListener('mousedown', onMouseDown);
+// One-shot flags (Enter / R / M) are consumed by the main loop each frame.
+export function consumePresses(input) {
+  const presses = {
+    enter: input.pressedEnter,
+    restart: input.pressedRestart,
+    mute: input.pressedMute,
+  };
+  input.pressedEnter = false;
+  input.pressedRestart = false;
+  input.pressedMute = false;
+  return presses;
+}
 
-  // One-shot flags the game loop reads and clears each frame.
-  state.consumeEnter = () => {
-    const v = state.enterPressed;
-    state.enterPressed = false;
-    return v;
-  };
-  state.consumeRestart = () => {
-    const v = state.restartPressed;
-    state.restartPressed = false;
-    return v;
-  };
-  state.consumeMute = () => {
-    const v = state.mutePressed;
-    state.mutePressed = false;
-    return v;
-  };
-  state.consumeClick = () => {
-    const v = state.clickPoint;
-    state.clickPoint = null;
-    return v;
-  };
-
-  // Test/shots helper: pretend a key is held without a real keyboard.
-  state.pressKey = (code) => {
-    keys.add(code);
-    recomputeMove();
-  };
-  state.releaseKey = (code) => {
-    keys.delete(code);
-    recomputeMove();
-  };
-
-  return state;
+export function consumeToss(input) {
+  const toss = input.toss;
+  input.toss = null;
+  return toss;
 }

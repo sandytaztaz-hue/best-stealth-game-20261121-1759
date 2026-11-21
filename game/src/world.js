@@ -1,502 +1,251 @@
-// world.js — the whole simulation: player movement and collision, guard
-// patrol / suspicious / alerted / search AI, line-of-sight and cone
-// occlusion, the detection meter, noise, pebbles, seeds, the exit gate
-// and the caught rule. Rendering never lives here; render.js only reads.
+// world.js — the game state and one fixed step of it.
+// Pure logic: no canvas, no DOM, no audio here, so the shot director and a
+// headless test can drive it. The render module draws whatever this holds.
 import {
-  WALK_SPEED,
-  TIPTOE_SPEED,
-  GUARD_PATROL_SPEED,
-  GUARD_INVESTIGATE_SPEED,
-  GUARD_CHASE_SPEED,
-  CONE_HALF_ANGLE,
-  CONE_RANGE,
-  CONE_RAYS,
-  DETECT_RATE_LIT,
-  DETECT_RATE_SHADOW,
-  DETECT_TIPTOE_MULT,
-  DETECT_DRAIN_RATE,
-  SUSPICIOUS_AT,
-  ALERTED_AT,
-  CAUGHT_DISTANCE,
-  LOSE_SIGHT_SECONDS,
-  SEARCH_SECONDS,
-  WALK_NOISE_RADIUS,
-  TIPTOE_NOISE_RADIUS,
-  WALK_STEP_INTERVAL,
-  TIPTOE_STEP_INTERVAL,
-  PEBBLE_COUNT,
-  PEBBLE_MAX_RANGE,
-  PEBBLE_NOISE_RADIUS,
-  PEBBLE_ARC_SECONDS,
-  WAYPOINT_PAUSE,
-  SUSPICIOUS_WAIT,
-  INVESTIGATE_TIMEOUT,
-  PLAYER_RADIUS,
-  GUARD_RADIUS,
-  SEED_PICKUP_RADIUS,
+  WALK_SPEED, TIPTOE_SPEED, PLAYER_RADIUS, PEBBLES_PER_LEVEL,
+  PEBBLE_THROW_RANGE, PEBBLE_HEAR_RADIUS, PEBBLE_FLIGHT_SECONDS,
+  DETECT_DRAIN, SUSPICIOUS_AT, ALERT_AT, SEED_PICKUP_DISTANCE, CAUGHT_DISTANCE,
+  STEP_WALK_SECONDS, STEP_TIPTOE_SECONDS, NOISE_WALK_RADIUS, NOISE_TIPTOE_RADIUS,
 } from './config.js';
-import { levelByIndex, blockingRects } from './levels.js';
-import { mulberry32, scatterPoints } from './random.js';
-import * as audio from './audio.js';
+import { LEVELS, levelBlockers } from './levels.js';
+import { makeGuard, updateGuard, guardHearsNoise, makeGuardSuspicious, makeGuardAlerted, calmAlertedGuards } from './guards.js';
+import { guardSeesPlayer, detectionRateFor, playerHidden, pointInRect } from './senses.js';
+import { makeRng } from './random.js';
 
-// --- geometry helpers -------------------------------------------------------
-
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
-function dist(ax, ay, bx, by) {
-  return Math.hypot(ax - bx, ay - by);
-}
-
-// Does segment (x1,y1)-(x2,y2) hit rect [rx,ry,rw,rh]?
-export function segmentHitsRect(x1, y1, x2, y2, rect) {
-  const [rx, ry, rw, rh] = rect;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  let tmin = 0;
-  let tmax = 1;
-  if (Math.abs(dx) < 1e-9) {
-    if (x1 < rx || x1 > rx + rw) return false;
-  } else {
-    let t1 = (rx - x1) / dx;
-    let t2 = (rx + rw - x1) / dx;
-    if (t1 > t2) [t1, t2] = [t2, t1];
-    tmin = Math.max(tmin, t1);
-    tmax = Math.min(tmax, t2);
-    if (tmin > tmax) return false;
-  }
-  if (Math.abs(dy) < 1e-9) {
-    if (y1 < ry || y1 > ry + rh) return false;
-  } else {
-    let t1 = (ry - y1) / dy;
-    let t2 = (ry + rh - y1) / dy;
-    if (t1 > t2) [t1, t2] = [t2, t1];
-    tmin = Math.max(tmin, t1);
-    tmax = Math.min(tmax, t2);
-    if (tmin > tmax) return false;
-  }
-  return true;
-}
-
-// Distance from a point to the first blocking rect along a ray, or Infinity.
-export function raycastDistance(x, y, dirX, dirY, maxDist, rects) {
-  let best = maxDist;
-  for (const rect of rects) {
-    const [rx, ry, rw, rh] = rect;
-    const dx = dirX;
-    const dy = dirY;
-    let tmin = 0;
-    let tmax = best;
-    let hit = true;
-    if (Math.abs(dx) < 1e-9) {
-      if (x < rx || x > rx + rw) hit = false;
-    } else {
-      let t1 = (rx - x) / dx;
-      let t2 = (rx + rw - x) / dx;
-      if (t1 > t2) [t1, t2] = [t2, t1];
-      tmin = Math.max(tmin, t1);
-      tmax = Math.min(tmax, t2);
-      if (tmin > tmax) hit = false;
-    }
-    if (hit) {
-      if (Math.abs(dy) < 1e-9) {
-        if (y < ry || y > ry + rh) hit = false;
-      } else {
-        let t1 = (ry - y) / dy;
-        let t2 = (ry + rh - y) / dy;
-        if (t1 > t2) [t1, t2] = [t2, t1];
-        tmin = Math.max(tmin, t1);
-        tmax = Math.min(tmax, t2);
-        if (tmin > tmax) hit = false;
-      }
-    }
-    if (hit && tmin < best && tmin >= 0) best = tmin;
-  }
-  return best;
-}
-
-// True when nothing (wall or hedge) stands between the two points.
-export function hasLineOfSight(ax, ay, bx, by, rects) {
-  for (const rect of rects) {
-    if (segmentHitsRect(ax, ay, bx, by, rect)) return false;
-  }
-  return true;
-}
-
-function circleHitsRect(cx, cy, r, rect) {
-  const [rx, ry, rw, rh] = rect;
-  const nx = clamp(cx, rx, rx + rw);
-  const ny = clamp(cy, ry, ry + rh);
-  return (cx - nx) * (cx - nx) + (cy - ny) * (cy - ny) < r * r;
-}
-
-// --- world ------------------------------------------------------------------
-
-export function createWorld(levelIndex, seed) {
-  const level = levelByIndex(levelIndex);
-  const rng = mulberry32(seed || 1);
-  const blockers = blockingRects(level);
-  const world = {
+export function createWorld(levelIndex, seed = 1) {
+  const level = LEVELS[levelIndex];
+  const rng = makeRng(seed * 1000 + levelIndex * 77 + 13);
+  return {
     levelIndex,
     level,
-    seed: seed || 1,
-    blockers,
-    time: 0,
-    levelTime: 0,
+    blockers: levelBlockers(level),
+    rng,
     player: {
-      x: level.playerStart[0],
-      y: level.playerStart[1],
-      radius: PLAYER_RADIUS,
-      facing: -Math.PI / 2,
-      moving: false,
+      x: level.start.x,
+      y: level.start.y,
+      angle: -Math.PI / 2,
       tiptoe: false,
+      moving: false,
       stepTimer: 0,
     },
-    guards: level.guards.map((g, i) => ({
-      id: i,
-      x: g.waypoints[0][0],
-      y: g.waypoints[0][1],
-      radius: GUARD_RADIUS,
-      facing: Math.PI / 2,
-      state: 'patrol', // patrol | suspicious | alerted | search
-      waypointIndex: 1,
-      pauseTimer: 0,
-      waitTimer: 0,
-      investigateTarget: null,
-      investigateTimer: 0,
-      lastSeen: null,
-      unseenTimer: 0,
-      searchTimer: 0,
-      waypoints: g.waypoints,
-    })),
-    seeds: level.seeds.map(([x, y]) => ({ x, y, taken: false, bob: rng() * Math.PI * 2 })),
+    guards: level.guards.map((def, i) => makeGuard(def, i)),
+    seeds: level.seeds.map((s) => ({ x: s.x, y: s.y, taken: false })),
     seedsCollected: 0,
-    exitOpen: false,
-    pebbles: PEBBLE_COUNT,
-    pebbleFlight: null, // {fromX, fromY, toX, toY, t}
-    pebbleLand: null, // {x, y, t} expanding ping ring
-    noiseRings: [], // {x, y, radius, maxRadius, t}
-    detection: 0,
-    alertState: 'unseen', // unseen | suspicious | hunted
+    meter: 0,
+    alert: 'unseen',
+    hidden: false,
+    pebbles: PEBBLES_PER_LEVEL,
+    pebble: null,
+    time: 0,
+    timesSpotted: 0,
+    noSightTimer: 0,
+    lastSeen: null,
     caught: false,
-    caughtTimer: 0,
-    levelComplete: false,
-    levelCompleteTimer: 0,
+    levelClear: false,
     won: false,
-    events: [], // one-frame notes for render (pickup flash, etc.)
-    moss: scatterPoints(rng, 90, 20, 80, 1240, 620),
-    fireflies: scatterPoints(rng, 26, 20, 80, 1240, 620).map((p) => ({
-      ...p,
-      phase: rng() * Math.PI * 2,
-      speed: 0.3 + rng() * 0.7,
-    })),
-    rng,
+    events: [],
   };
-  return world;
 }
 
-export function playerInLampLight(world, x, y) {
-  for (const lamp of world.level.lamps) {
-    if (dist(x, y, lamp.x, lamp.y) <= lamp.r) return true;
+export function exitUnlocked(world) {
+  return world.seedsCollected >= world.seeds.length;
+}
+
+export function alertWord(world) {
+  if (world.alert === 'hunted') return 'Hunted';
+  if (world.alert === 'suspicious') return 'Suspicious';
+  if (world.hidden) return 'Hidden';
+  return 'Unseen';
+}
+
+function circleHitsRect(x, y, radius, rect) {
+  const cx = Math.max(rect.x, Math.min(x, rect.x + rect.w));
+  const cy = Math.max(rect.y, Math.min(y, rect.y + rect.h));
+  const dx = x - cx;
+  const dy = y - cy;
+  return dx * dx + dy * dy < radius * radius;
+}
+
+function collides(world, x, y) {
+  for (const rect of world.blockers) {
+    if (circleHitsRect(x, y, PLAYER_RADIUS, rect)) return true;
   }
   return false;
 }
 
-function guardSeesPlayer(world, guard) {
-  const p = world.player;
-  const d = dist(guard.x, guard.y, p.x, p.y);
-  if (d > CONE_RANGE) return false;
-  let angle = Math.atan2(p.y - guard.y, p.x - guard.x) - guard.facing;
-  while (angle > Math.PI) angle -= Math.PI * 2;
-  while (angle < -Math.PI) angle += Math.PI * 2;
-  if (Math.abs(angle) > CONE_HALF_ANGLE) return false;
-  return hasLineOfSight(guard.x, guard.y, p.x, p.y, world.blockers);
-}
-
-function moveGuardToward(guard, tx, ty, speed, dt) {
-  const dx = tx - guard.x;
-  const dy = ty - guard.y;
-  const d = Math.hypot(dx, dy);
-  if (d < 1) return true;
-  const step = Math.min(d, speed * dt);
-  guard.x += (dx / d) * step;
-  guard.y += (dy / d) * step;
-  guard.facing = Math.atan2(dy, dx);
-  return d <= speed * dt + 0.5;
-}
-
-function setGuardSuspicious(world, guard, target, quiet) {
-  if (guard.state !== 'suspicious') {
-    guard.state = 'suspicious';
-    guard.waitTimer = SUSPICIOUS_WAIT;
-    guard.investigateTarget = target;
-    guard.investigateTimer = 0;
-    if (!quiet) audio.playSuspiciousBlip();
+// Move with sliding: try x, then y, so the player glides along walls.
+export function movePlayer(world, dx, dy, dt) {
+  const player = world.player;
+  const speed = player.tiptoe ? TIPTOE_SPEED : WALK_SPEED;
+  const nx = player.x + dx * speed * dt;
+  if (!collides(world, nx, player.y)) player.x = nx;
+  const ny = player.y + dy * speed * dt;
+  if (!collides(world, player.x, ny)) player.y = ny;
+  player.x = Math.max(16 + PLAYER_RADIUS, Math.min(1264 - PLAYER_RADIUS, player.x));
+  player.y = Math.max(16 + PLAYER_RADIUS, Math.min(704 - PLAYER_RADIUS, player.y));
+  if (dx !== 0 || dy !== 0) {
+    player.angle = Math.atan2(dy, dx);
+    player.moving = true;
+  } else {
+    player.moving = false;
   }
-  guard.facing = Math.atan2(target.y - guard.y, target.x - guard.x);
 }
 
-function setGuardAlerted(world, guard) {
-  if (guard.state !== 'alerted') {
-    guard.state = 'alerted';
-    guard.unseenTimer = 0;
-    audio.playAlertSting();
-  }
-  guard.lastSeen = { x: world.player.x, y: world.player.y };
-}
-
-function emitNoise(world, x, y, radius) {
-  world.noiseRings.push({ x, y, radius: 6, maxRadius: radius, t: 0 });
+function emitFootstep(world) {
+  const player = world.player;
+  const radius = player.tiptoe ? NOISE_TIPTOE_RADIUS : NOISE_WALK_RADIUS;
+  const noise = { x: player.x, y: player.y, radius, kind: 'step', quiet: player.tiptoe };
+  world.events.push({ type: 'footstep', x: player.x, y: player.y, radius, quiet: player.tiptoe });
   for (const guard of world.guards) {
-    if (guard.state === 'alerted') continue;
-    if (dist(guard.x, guard.y, x, y) <= radius) {
-      setGuardSuspicious(world, guard, { x, y }, false);
+    if (guard.state === 'patrol' && guardHearsNoise(guard, noise)) {
+      makeGuardSuspicious(guard, noise.x, noise.y);
+      world.events.push({ type: 'guard-suspicious', guard: guard.id });
     }
   }
 }
 
-export function tossPebble(world, targetX, targetY) {
-  if (world.pebbles <= 0 || world.pebbleFlight) return false;
-  const p = world.player;
-  const dx = targetX - p.x;
-  const dy = targetY - p.y;
-  const d = Math.hypot(dx, dy);
-  const range = Math.min(d, PEBBLE_MAX_RANGE);
-  const tx = d > 0 ? p.x + (dx / d) * range : p.x;
-  const ty = d > 0 ? p.y + (dy / d) * range : p.y;
+export function tossPebble(world, tx, ty) {
+  if (world.pebbles <= 0 || world.pebble) return false;
+  const player = world.player;
+  const dx = tx - player.x;
+  const dy = ty - player.y;
+  const dist = Math.hypot(dx, dy);
+  const range = Math.min(dist, PEBBLE_THROW_RANGE);
+  const scale = dist > 0 ? range / dist : 0;
   world.pebbles -= 1;
-  world.pebbleFlight = { fromX: p.x, fromY: p.y, toX: tx, toY: ty, t: 0 };
+  world.pebble = {
+    sx: player.x,
+    sy: player.y,
+    tx: player.x + dx * scale,
+    ty: player.y + dy * scale,
+    t: 0,
+    dur: PEBBLE_FLIGHT_SECONDS,
+  };
   return true;
 }
 
-// --- per-frame update --------------------------------------------------------
-
-export function updateWorld(world, input, dt) {
-  world.time += dt;
-  world.levelTime += dt;
-  world.events = [];
-  const p = world.player;
-
-  if (world.caught) {
-    world.caughtTimer += dt;
-    return;
+function landPebble(world) {
+  const pebble = world.pebble;
+  world.pebble = null;
+  world.events.push({ type: 'pebble-ping', x: pebble.tx, y: pebble.ty, radius: PEBBLE_HEAR_RADIUS });
+  const noise = { x: pebble.tx, y: pebble.ty, radius: PEBBLE_HEAR_RADIUS, kind: 'pebble' };
+  for (const guard of world.guards) {
+    if (guard.state !== 'alerted' && guardHearsNoise(guard, noise)) {
+      makeGuardSuspicious(guard, noise.x, noise.y);
+    }
   }
-  if (world.levelComplete) {
-    world.levelCompleteTimer += dt;
-    return;
-  }
+}
 
-  // --- player movement ---
-  const speed = input.tiptoe ? TIPTOE_SPEED : WALK_SPEED;
-  p.tiptoe = input.tiptoe;
-  p.moving = input.moveX !== 0 || input.moveY !== 0;
-  if (p.moving) {
-    const nx = p.x + input.moveX * speed * dt;
-    const ny = p.y + input.moveY * speed * dt;
-    // Move axis by axis so the player slides along walls instead of sticking.
-    if (!world.blockers.some((r) => circleHitsRect(nx, p.y, p.radius, r))) p.x = nx;
-    if (!world.blockers.some((r) => circleHitsRect(p.x, ny, p.radius, r))) p.y = ny;
-    p.x = clamp(p.x, 16 + p.radius, 1280 - 16 - p.radius);
-    p.y = clamp(p.y, 16 + p.radius, 720 - 16 - p.radius);
-    p.facing = Math.atan2(input.moveY, input.moveX);
-    // Footsteps: a noise ring every step, quieter while tiptoeing.
-    p.stepTimer -= dt;
-    if (p.stepTimer <= 0) {
-      p.stepTimer = input.tiptoe ? TIPTOE_STEP_INTERVAL : WALK_STEP_INTERVAL;
-      const radius = input.tiptoe ? TIPTOE_NOISE_RADIUS : WALK_NOISE_RADIUS;
-      world.noiseRings.push({ x: p.x, y: p.y, radius: 6, maxRadius: radius, t: 0 });
-      audio.playFootstep(input.tiptoe);
+function updateDetection(world, dt) {
+  let highestRate = 0;
+  let anySees = false;
+  let anySuspicious = false;
+  let anyAlerted = false;
+  for (const guard of world.guards) {
+    const sees = guardSeesPlayer(guard, world.player, world.blockers);
+    if (sees) {
+      anySees = true;
+      const rate = detectionRateFor(guard, world);
+      if (rate > highestRate) highestRate = rate;
+    }
+    if (guard.state === 'suspicious') anySuspicious = true;
+    if (guard.state === 'alerted') anyAlerted = true;
+  }
+  if (anySees) {
+    world.noSightTimer = 0;
+    world.lastSeen = { x: world.player.x, y: world.player.y };
+    const before = world.meter;
+    world.meter = Math.min(ALERT_AT, world.meter + highestRate * dt);
+    if (before < SUSPICIOUS_AT && world.meter >= SUSPICIOUS_AT && world.meter < ALERT_AT) {
       for (const guard of world.guards) {
-        if (guard.state === 'alerted') continue;
-        if (dist(guard.x, guard.y, p.x, p.y) <= radius) {
-          setGuardSuspicious(world, guard, { x: p.x, y: p.y }, false);
+        if (guardSeesPlayer(guard, world.player, world.blockers) && guard.state === 'patrol') {
+          makeGuardSuspicious(guard, world.player.x, world.player.y);
+          world.events.push({ type: 'guard-suspicious', guard: guard.id });
         }
+      }
+      world.events.push({ type: 'suspicious-blip' });
+    }
+    if (world.meter >= ALERT_AT && before < ALERT_AT) {
+      world.timesSpotted += 1;
+      for (const guard of world.guards) {
+        makeGuardAlerted(guard, world.player.x, world.player.y);
+      }
+      world.events.push({ type: 'alert-sting' });
+    }
+  } else {
+    world.noSightTimer += dt;
+    world.meter = Math.max(0, world.meter - DETECT_DRAIN * dt);
+    calmAlertedGuards(world, dt);
+  }
+  if (anyAlerted) world.alert = 'hunted';
+  else if (anySuspicious || world.meter >= SUSPICIOUS_AT) world.alert = 'suspicious';
+  else world.alert = 'unseen';
+  world.hidden = playerHidden(world);
+  // A sentry never walks, but an alerted sentry still catches a player who
+  // blunders into its post.
+  if (world.alert === 'hunted') {
+    for (const guard of world.guards) {
+      if (guard.type === 'sentry' && guard.state === 'alerted'
+        && Math.hypot(guard.x - world.player.x, guard.y - world.player.y) <= CAUGHT_DISTANCE) {
+        world.caught = true;
       }
     }
   }
+}
 
-  // --- pebble flight and landing ---
-  if (world.pebbleFlight) {
-    const f = world.pebbleFlight;
-    f.t += dt / PEBBLE_ARC_SECONDS;
-    if (f.t >= 1) {
-      world.pebbleFlight = null;
-      world.pebbleLand = { x: f.toX, y: f.toY, t: 0 };
-      audio.playPebblePing();
-      emitNoise(world, f.toX, f.toY, PEBBLE_NOISE_RADIUS);
-    }
-  }
-  if (world.pebbleLand) {
-    world.pebbleLand.t += dt;
-    if (world.pebbleLand.t > 0.8) world.pebbleLand = null;
-  }
-  for (const ring of world.noiseRings) {
-    ring.t += dt;
-    ring.radius += (ring.maxRadius - ring.radius) * Math.min(1, dt * 8) + dt * 40;
-  }
-  world.noiseRings = world.noiseRings.filter((r) => r.t < 0.6);
-
-  // --- seeds ---
+function updatePickupsAndExit(world) {
+  const player = world.player;
   for (const seed of world.seeds) {
-    seed.bob += dt * 2;
-    if (!seed.taken && dist(p.x, p.y, seed.x, seed.y) <= SEED_PICKUP_RADIUS) {
+    if (!seed.taken && Math.hypot(seed.x - player.x, seed.y - player.y) <= SEED_PICKUP_DISTANCE) {
       seed.taken = true;
       world.seedsCollected += 1;
-      audio.playPickupChime();
       world.events.push({ type: 'pickup', x: seed.x, y: seed.y });
-      if (world.seedsCollected >= world.seeds.length) {
-        world.exitOpen = true;
-        world.events.push({ type: 'exit-open', x: world.level.exit[0], y: world.level.exit[1] });
+      if (exitUnlocked(world)) {
+        world.events.push({ type: 'exit-unlocked' });
       }
     }
   }
-
-  // --- exit gate ---
-  if (world.exitOpen) {
-    const [ex, ey, ew, eh] = world.level.exit;
-    if (p.x > ex - 4 && p.x < ex + ew + 4 && p.y > ey - 4 && p.y < ey + eh + 4) {
-      world.levelComplete = true;
-      world.levelCompleteTimer = 0;
-      return;
+  if (exitUnlocked(world) && pointInRect(player.x, player.y, world.level.exit)) {
+    if (world.levelIndex >= LEVELS.length - 1) {
+      world.won = true;
+      world.events.push({ type: 'win' });
+    } else {
+      world.levelClear = true;
+      world.events.push({ type: 'level-clear' });
     }
   }
-
-  // --- detection: any guard seeing the player right now? ---
-  let anyoneSees = false;
-  for (const guard of world.guards) {
-    if (guardSeesPlayer(world, guard)) {
-      anyoneSees = true;
-      break;
-    }
-  }
-  const inLight = playerInLampLight(world, p.x, p.y);
-  if (anyoneSees) {
-    let rate = inLight ? DETECT_RATE_LIT : DETECT_RATE_SHADOW;
-    if (p.tiptoe) rate *= DETECT_TIPTOE_MULT;
-    world.detection = Math.min(1, world.detection + rate * dt);
-  } else {
-    world.detection = Math.max(0, world.detection - DETECT_DRAIN_RATE * dt);
-  }
-
-  // Meter crossings drive the guard states.
-  if (world.detection >= ALERTED_AT) {
-    for (const guard of world.guards) setGuardAlerted(world, guard);
-  } else if (world.detection >= SUSPICIOUS_AT) {
-    for (const guard of world.guards) {
-      if (guardSeesPlayer(world, guard) && guard.state === 'patrol') {
-        setGuardSuspicious(world, guard, { x: p.x, y: p.y }, false);
-      }
-    }
-  }
-
-  // --- guard AI ---
-  for (const guard of world.guards) {
-    const sees = guardSeesPlayer(world, guard);
-    if (guard.state === 'patrol') {
-      const wp = guard.waypoints[guard.waypointIndex];
-      if (guard.pauseTimer > 0) {
-        guard.pauseTimer -= dt;
-      } else if (moveGuardToward(guard, wp[0], wp[1], GUARD_PATROL_SPEED, dt)) {
-        guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
-        guard.pauseTimer = WAYPOINT_PAUSE;
-      }
-    } else if (guard.state === 'suspicious') {
-      if (guard.waitTimer > 0) {
-        guard.waitTimer -= dt;
-        if (guard.investigateTarget) {
-          guard.facing = Math.atan2(
-            guard.investigateTarget.y - guard.y,
-            guard.investigateTarget.x - guard.x,
-          );
-        }
-      } else if (guard.investigateTarget) {
-        const arrived = moveGuardToward(
-          guard,
-          guard.investigateTarget.x,
-          guard.investigateTarget.y,
-          GUARD_INVESTIGATE_SPEED,
-          dt,
-        );
-        guard.investigateTimer += dt;
-        if (arrived || guard.investigateTimer > INVESTIGATE_TIMEOUT) {
-          guard.state = 'patrol';
-          guard.investigateTarget = null;
-          guard.investigateTimer = 0;
-        }
-      }
-    } else if (guard.state === 'alerted') {
-      if (sees) {
-        guard.unseenTimer = 0;
-        guard.lastSeen = { x: p.x, y: p.y };
-      } else {
-        guard.unseenTimer += dt;
-      }
-      if (guard.unseenTimer >= LOSE_SIGHT_SECONDS) {
-        guard.state = 'search';
-        guard.searchTimer = SEARCH_SECONDS;
-        continue;
-      }
-      // Converge on the player's position (last seen if not currently seen).
-      const target = sees ? p : guard.lastSeen || p;
-      moveGuardToward(guard, target.x, target.y, GUARD_CHASE_SPEED, dt);
-      if (dist(guard.x, guard.y, p.x, p.y) <= CAUGHT_DISTANCE) {
-        world.caught = true;
-        world.caughtTimer = 0;
-        world.events.push({ type: 'caught' });
-      }
-    } else if (guard.state === 'search') {
-      if (guard.lastSeen) {
-        moveGuardToward(guard, guard.lastSeen.x, guard.lastSeen.y, GUARD_INVESTIGATE_SPEED, dt);
-      }
-      guard.searchTimer -= dt;
-      if (guard.searchTimer <= 0) {
-        guard.state = 'patrol';
-        guard.lastSeen = null;
-      }
-    }
-  }
-
-  // --- alert word for the HUD ---
-  const anyAlerted = world.guards.some((g) => g.state === 'alerted');
-  const anySuspicious = world.guards.some((g) => g.state === 'suspicious' || g.state === 'search');
-  world.alertState = anyAlerted ? 'hunted' : anySuspicious ? 'suspicious' : 'unseen';
 }
 
-// Occluded vision cone as a polygon: sample the cone edge with CONE_RAYS
-// rays, raycast each to the nearest blocker, join the points. Cones
-// visibly stop at cover.
-export function conePolygon(world, guard) {
-  const points = [{ x: guard.x, y: guard.y }];
-  for (let i = 0; i <= CONE_RAYS; i += 1) {
-    const angle = guard.facing - CONE_HALF_ANGLE + (2 * CONE_HALF_ANGLE * i) / CONE_RAYS;
-    const d = raycastDistance(guard.x, guard.y, Math.cos(angle), Math.sin(angle), CONE_RANGE, world.blockers);
-    points.push({ x: guard.x + Math.cos(angle) * d, y: guard.y + Math.sin(angle) * d });
+// One fixed step. `input` is {x, y, tiptoe, toss} where x/y is a -1..1 move
+// direction and toss is {x, y} in canvas pixels, or null.
+export function stepWorld(world, input, dt) {
+  if (world.caught || world.levelClear || world.won) return;
+  world.time += dt;
+  world.player.tiptoe = !!input.tiptoe;
+  movePlayer(world, input.x || 0, input.y || 0, dt);
+  if (world.player.moving) {
+    world.player.stepTimer -= dt;
+    if (world.player.stepTimer <= 0) {
+      world.player.stepTimer = world.player.tiptoe ? STEP_TIPTOE_SECONDS : STEP_WALK_SECONDS;
+      emitFootstep(world);
+    }
   }
-  return points;
-}
-
-// The nearest guard that currently sees a player standing at (x, y),
-// or null. The shot driver uses this to back out of a cone it is in.
-export function seeingGuardAt(world, x, y) {
-  let nearest = null;
-  let nearestDist = Infinity;
+  if (input.toss) tossPebble(world, input.toss.x, input.toss.y);
+  if (world.pebble) {
+    world.pebble.t += dt;
+    if (world.pebble.t >= world.pebble.dur) landPebble(world);
+  }
   for (const guard of world.guards) {
-    const d = dist(guard.x, guard.y, x, y);
-    if (d > CONE_RANGE || d >= nearestDist) continue;
-    let angle = Math.atan2(y - guard.y, x - guard.x) - guard.facing;
-    while (angle > Math.PI) angle -= Math.PI * 2;
-    while (angle < -Math.PI) angle += Math.PI * 2;
-    if (Math.abs(angle) > CONE_HALF_ANGLE) continue;
-    if (!hasLineOfSight(guard.x, guard.y, x, y, world.blockers)) continue;
-    nearest = guard;
-    nearestDist = d;
+    const sees = guardSeesPlayer(guard, world.player, world.blockers);
+    updateGuard(world, guard, dt, sees);
   }
-  return nearest;
+  updateDetection(world, dt);
+  updatePickupsAndExit(world);
 }
 
-// Would any guard see a player standing at (x, y) right now? The shot
-// driver uses this to wait out a patrol instead of walking into a cone.
-export function isPositionSeen(world, x, y) {
-  return seeingGuardAt(world, x, y) !== null;
+// Drain the world's event queue: the main loop turns events into sound and fx.
+export function drainEvents(world) {
+  const events = world.events;
+  world.events = [];
+  return events;
 }
